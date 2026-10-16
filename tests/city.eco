@@ -1,0 +1,170 @@
+/**
+ * GeoIP2 City and GeoLite2 ASN, against the answers libmaxminddb gives for
+ * MaxMind's test databases.
+ */
+
+use mmdb::{Database, Found, Entry, Kind};
+
+#[group: "city"]
+test city_metadata
+{
+    $d = db('GeoIP2-City-Test');
+
+    assert($d->meta->type == 'GeoIP2-City');
+    assert($d->meta->nodes == 1547);
+    assert($d->meta->recordSize == 28);
+    assert($d->meta->ipVersion == 6);
+    assert($d->meta->major == 2);
+    assert($d->meta->buildEpoch == 1770245369);
+    assert($d->meta->languages->count() == 2);
+    assert($d->meta->languages[0] == 'en');
+    assert($d->meta->languages[1] == 'zh');
+    assert($d->meta->description->size() > 0);
+}
+
+#[group: "city"]
+test city_london
+{
+    $d = db('GeoIP2-City-Test');
+    Found $f = guard $d->lookup(mapped(81, 2, 69, 142));
+    Entry $r = $f->entry;
+
+    assert($f->prefix == 31);
+    assert($r->kind() == Kind::dict);
+    assert(($r->get('city')->get('geoname_id')->asUint() ?? 0) == 2643743);
+    assert(($r->get('city')->get('names')->get('en')->asStr() ?? '') == 'London');
+    assert(($r->get('city')->get('names')->get('de')->asStr() ?? '') == 'London');
+    assert(($r->get('city')->get('names')->get('es')->asStr() ?? '') == 'Londres');
+    assert(($r->get('continent')->get('code')->asStr() ?? '') == 'EU');
+    assert(($r->get('country')->get('iso_code')->asStr() ?? '') == 'GB');
+    assert(($r->get('registered_country')->get('iso_code')->asStr() ?? '') == 'US');
+    assert(($r->get('subdivisions')->at(0)->get('iso_code')->asStr() ?? '') == 'ENG');
+    assert(($r->get('location')->get('accuracy_radius')->asUint() ?? 0) == 10);
+    assert(($r->get('location')->get('latitude')->asFloat() ?? 0.0) == 51.5142);
+    assert(($r->get('location')->get('longitude')->asFloat() ?? 0.0) == -0.0931);
+    assert(($r->get('location')->get('time_zone')->asStr() ?? '') == 'Europe/London');
+}
+
+#[group: "city"]
+test city_four_and_sixteen_bytes_agree
+{
+    $d = db('GeoIP2-City-Test');
+    Found $short = guard $d->lookup(v4(81, 2, 69, 142));
+    Found $long = guard $d->lookup(mapped(81, 2, 69, 142));
+
+    assert($short->prefix == $long->prefix);
+    assert(($short->entry->get('city')->get('geoname_id')->asUint() ?? 0) == 2643743);
+}
+
+#[group: "city"]
+test city_two_subdivisions_postal_and_names
+{
+    $d = db('GeoIP2-City-Test');
+    Found $f = guard $d->lookup(v4(2, 125, 160, 216));
+    Entry $subs = $f->entry->get('subdivisions');
+
+    assert($subs->count() == 2);
+    assert($subs->items()->count() == 2);
+    assert(($subs->at(0)->get('iso_code')->asStr() ?? '') == 'ENG');
+    assert(($subs->at(1)->get('iso_code')->asStr() ?? '') == 'WBK');
+    assert(($subs->at(1)->get('geoname_id')->asUint() ?? 0) == 3333217);
+    assert(!$subs->at(2)->exists());
+    assert(($f->entry->get('postal')->get('code')->asStr() ?? '') == 'OX1');
+    assert(($f->entry->get('registered_country')->get('is_in_european_union')->asBool() ?? false));
+
+    // every language a name has, in stored order
+    $names = $f->entry->get('country')->get('names')->pairs();
+
+    assert($names->count() == 8);
+    assert($names[0]->key == 'de');
+    assert(($names[0]->value->asStr() ?? '') == 'Vereinigtes Königreich');
+    assert($names[7]->key == 'zh-CN');
+}
+
+#[group: "city"]
+test city_metro_and_represented
+{
+    $d = db('GeoIP2-City-Test');
+    Found $milton = guard $d->lookup(v4(216, 160, 83, 56));
+    Found $manila = guard $d->lookup(v4(202, 196, 224, 1));
+    Found $anycast = guard $d->lookup(v4(214, 1, 1, 1));
+
+    assert(($milton->entry->get('location')->get('metro_code')->asUint() ?? 0) == 819);
+    assert(($milton->entry->get('postal')->get('code')->asStr() ?? '') == '98354');
+    assert(($manila->entry->get('represented_country')->get('iso_code')->asStr() ?? '') == 'US');
+    assert(($anycast->entry->get('traits')->get('is_anycast')->asBool() ?? false));
+    assert($anycast->prefix == 24);
+}
+
+#[group: "city"]
+test city_ipv6
+{
+    $d = db('GeoIP2-City-Test');
+    array<uint16> $g = [8193, 536, 0, 0, 0, 0, 0, 1];
+    Found $f = guard $d->lookup(v6($g));
+
+    assert($f->prefix == 32);
+    assert(($f->entry->get('country')->get('iso_code')->asStr() ?? '') == 'JP');
+    assert(($f->entry->get('location')->get('time_zone')->asStr() ?? '') == 'Asia/Tokyo');
+}
+
+#[group: "city"]
+test city_unknown_and_missing
+{
+    $d = db('GeoIP2-City-Test');
+
+    assert($d->lookup(v4(10, 0, 0, 1)) == null);
+    assert($d->lookup(v4(127, 0, 0, 1)) == null);
+    assert($d->lookup('abc') == null);
+
+    Found $f = guard $d->lookup(v4(81, 2, 69, 142));
+
+    // a missing path is missing all the way down, never a crash
+    assert(!$f->entry->get('nope')->exists());
+    assert($f->entry->get('nope')->get('deeper')->at(3)->asStr() == null);
+    assert($f->entry->get('nope')->kind() == Kind::missing);
+    assert($f->entry->get('city')->asStr() == null);
+    assert($f->entry->get('city')->get('names')->get('en')->asUint() == null);
+}
+
+#[group: "asn"]
+test asn_lookups
+{
+    $d = db('GeoLite2-ASN-Test');
+    Found $telstra = guard $d->lookup(v4(1, 128, 0, 1));
+    Found $att = guard $d->lookup(v4(12, 81, 92, 1));
+    array<uint16> $g = [9728, 24576, 0, 0, 0, 0, 0, 1];
+    Found $merit = guard $d->lookup(v6($g));
+
+    assert($d->meta->type == 'GeoLite2-ASN');
+    assert(($telstra->entry->get('autonomous_system_number')->asUint() ?? 0) == 1221);
+    assert(($telstra->entry->get('autonomous_system_organization')->asStr() ?? '') == 'Telstra Pty Ltd');
+    assert($telstra->prefix == 11);
+    assert(($att->entry->get('autonomous_system_organization')->asStr() ?? '') == 'AT&T Services');
+    assert($att->prefix == 22);
+    assert(($merit->entry->get('autonomous_system_number')->asUint() ?? 0) == 237);
+    assert($merit->prefix == 20);
+}
+
+#[group: "open"]
+test open_errors
+{
+    guard Database::open('tests/data/does-not-exist.mmdb') else ($e) {
+        return;
+    }
+
+    assert(false, 'a missing file must not open');
+}
+
+#[group: "open"]
+test parse_rejects_non_mmdb
+{
+    string $junk = 'definitely not a database';
+
+    guard Database::parse(mv $junk) else ($e) {
+        assert("{$e}" == 'not a MaxMind DB file: no metadata marker');
+        return;
+    }
+
+    assert(false, 'junk must not parse');
+}

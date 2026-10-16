@@ -1,0 +1,39 @@
+MIT License
+
+Copyright (c) 2026 Mario Döring
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+Third-party notices
+
+The files under tests/data are test databases from MaxMind's MaxMind-DB
+repository (https://github.com/maxmind/MaxMind-DB), Copyright (c) 2013 - 2026
+MaxMind, Inc., licensed under the Apache License, Version 2.0 or the MIT
+License, at your option. They are only used by the tests.
+
+libmmdb implements the MaxMind DB File Format Specification, which MaxMind
+publishes under the Creative Commons Attribution-ShareAlike 3.0 Unported
+License (https://creativecommons.org/licenses/by-sa/3.0/).
+
+No GeoIP2, GeoLite2 or other production database ships with libmmdb. Those
+come under their own terms from their vendors (for MaxMind, the GeoLite2 or
+GeoIP2 end user license agreement), and those terms apply to any database you
+open with this library.

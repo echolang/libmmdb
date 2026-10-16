@@ -1,0 +1,388 @@
+/**
+ * A value in the data section, read lazily: an `Entry` is a position, and
+ * decoding happens in the accessor you call. A GeoIP2 City record is a
+ * nested map with names in eight languages, and a lookup usually wants four
+ * fields of it, so nothing is decoded that nobody asked for.
+ */
+
+namespace mmdb;
+
+/**
+ * A position in the data section. `get` and `at` never fail: a key or index
+ * that is not there gives a `missing` entry, and every accessor on a missing
+ * entry answers null, so a path chains without a guard per step:
+ *
+ *     string? $city = $found->entry->get('city')->get('names')->get('en')->asStr();
+ */
+public struct Entry
+{
+    private Image $image;
+    private usize $base;
+    private usize $at;
+    private bool $present;
+
+    internal constructor(Image $image, usize $base, usize $at, bool $present)
+    {
+        $this->image = $image;
+        $this->base = $base;
+        $this->at = $at;
+        $this->present = $present;
+    }
+
+    public const function exists() : bool
+    {
+        return $this->present && $this->kind() != Kind::missing;
+    }
+
+    /**
+     * The stored type, or `missing`. A field that does not decode reads as
+     * `missing` too: a broken record is treated as an absent one.
+     */
+    public const function kind() : Kind
+    {
+        Header $h = guard $this->header() else {
+            return .missing;
+        }
+
+        return $h->kind;
+    }
+
+    /**
+     * How many pairs a map holds or items an array holds. 0 for anything
+     * else.
+     */
+    public const function count() : usize
+    {
+        Header $h = guard $this->header() else {
+            return 0;
+        }
+
+        if ($h->kind == Kind::dict || $h->kind == Kind::list) {
+            return $h->size;
+        }
+
+        return 0;
+    }
+
+    /**
+     * The value under `$key` in a map, or `missing`.
+     */
+    public const function get(const string& $key) : Entry
+    {
+        Header $h = guard $this->header() else {
+            return $this->none();
+        }
+
+        if ($h->kind != Kind::dict) {
+            return $this->none();
+        }
+
+        usize $p = $h->data;
+        usize $i = 0;
+
+        while ($i < $h->size) {
+            string $name = guard $this->text($p) else {
+                return $this->none();
+            }
+
+            usize $value = guard $this->image->skip($this->base, $p) else {
+                return $this->none();
+            }
+
+            if ($name == $key) {
+                return Entry($this->image, $this->base, $value, true);
+            }
+
+            usize $next = guard $this->image->skip($this->base, $value) else {
+                return $this->none();
+            }
+
+            $p = $next;
+
+            $i = $i + 1;
+        }
+
+        return $this->none();
+    }
+
+    /**
+     * Item `$i` of an array, or `missing`.
+     */
+    public const function at(usize $i) : Entry
+    {
+        Header $h = guard $this->header() else {
+            return $this->none();
+        }
+
+        if ($h->kind != Kind::list || $i >= $h->size) {
+            return $this->none();
+        }
+
+        usize $p = $h->data;
+        usize $n = 0;
+
+        while ($n < $i) {
+            usize $next = guard $this->image->skip($this->base, $p) else {
+                return $this->none();
+            }
+
+            $p = $next;
+
+            $n = $n + 1;
+        }
+
+        return Entry($this->image, $this->base, $p, true);
+    }
+
+    /**
+     * Every key and value of a map, in stored order. Empty for anything but
+     * a map.
+     */
+    public const function pairs() : array<Pair>
+    {
+        $out = array<Pair>();
+
+        Header $h = guard $this->header() else {
+            return $out;
+        }
+
+        if ($h->kind != Kind::dict) {
+            return $out;
+        }
+
+        usize $p = $h->data;
+        usize $i = 0;
+
+        while ($i < $h->size) {
+            string $name = guard $this->text($p) else {
+                return $out;
+            }
+
+            usize $value = guard $this->image->skip($this->base, $p) else {
+                return $out;
+            }
+
+            $out[] = Pair($name, Entry($this->image, $this->base, $value, true));
+
+            usize $next = guard $this->image->skip($this->base, $value) else {
+                return $out;
+            }
+
+            $p = $next;
+
+            $i = $i + 1;
+        }
+
+        return $out;
+    }
+
+    /**
+     * Every item of an array. Empty for anything but an array.
+     */
+    public const function items() : array<Entry>
+    {
+        $out = array<Entry>();
+
+        Header $h = guard $this->header() else {
+            return $out;
+        }
+
+        if ($h->kind != Kind::list) {
+            return $out;
+        }
+
+        usize $p = $h->data;
+        usize $i = 0;
+
+        while ($i < $h->size) {
+            $out[] = Entry($this->image, $this->base, $p, true);
+
+            usize $next = guard $this->image->skip($this->base, $p) else {
+                return $out;
+            }
+
+            $p = $next;
+
+            $i = $i + 1;
+        }
+
+        return $out;
+    }
+
+    /**
+     * A UTF-8 string field.
+     */
+    public const function asStr() : string?
+    {
+        return $this->text($this->at);
+    }
+
+    /**
+     * Any unsigned field, and a uint128 whose value fits in 64 bits.
+     */
+    public const function asUint() : uint64?
+    {
+        Header $h = guard $this->header() else {
+            return null;
+        }
+
+        if ($h->kind == Kind::u16 || $h->kind == Kind::u32 || $h->kind == Kind::u64) {
+            return $this->number($h);
+        }
+
+        if ($h->kind != Kind::u128 || !$this->image->fits($h->data, $h->size)) {
+            return null;
+        }
+
+        // a uint128 fits when everything above the low 8 bytes is zero
+        usize $i = 0;
+
+        while ($i + 8 < $h->size) {
+            if ($this->image->data->byte($h->data + $i) != 0) {
+                return null;
+            }
+
+            $i = $i + 1;
+        }
+
+        return $this->image->be($h->data + $i, $h->size - $i);
+    }
+
+    /**
+     * An int32 field, sign and all, and any unsigned field that fits in an
+     * int64.
+     */
+    public const function asInt() : int64?
+    {
+        Header $h = guard $this->header() else {
+            return null;
+        }
+
+        if ($h->kind == Kind::i32) {
+            uint64 $raw = guard $this->number($h) else {
+                return null;
+            }
+
+            // only a full four bytes can carry the sign bit
+            if ($h->size == 4 && $raw >= 2147483648) {
+                return ($raw as int64) - 4294967296;
+            }
+
+            return $raw as int64;
+        }
+
+        uint64 $u = guard $this->asUint() else {
+            return null;
+        }
+
+        if ($u > 9223372036854775807) {
+            return null;
+        }
+
+        return $u as int64;
+    }
+
+    /**
+     * A double or float field, the float widened.
+     */
+    public const function asFloat() : float64?
+    {
+        Header $h = guard $this->header() else {
+            return null;
+        }
+
+        if ($h->kind == Kind::f64 && $h->size == 8 && $this->image->fits($h->data, 8)) {
+            return mem::bit_cast<float64, uint64>($this->image->be($h->data, 8));
+        }
+
+        if ($h->kind == Kind::f32 && $h->size == 4 && $this->image->fits($h->data, 4)) {
+            uint32 $bits = $this->image->be($h->data, 4) as uint32;
+
+            return mem::bit_cast<float32, uint32>($bits) as float64;
+        }
+
+        return null;
+    }
+
+    public const function asBool() : bool?
+    {
+        Header $h = guard $this->header() else {
+            return null;
+        }
+
+        if ($h->kind != Kind::boolean || $h->size > 1) {
+            return null;
+        }
+
+        return $h->size == 1;
+    }
+
+    /**
+     * A bytes field, or the raw big-endian bytes of a uint128.
+     */
+    public const function asBytes() : string?
+    {
+        Header $h = guard $this->header() else {
+            return null;
+        }
+
+        if ($h->kind != Kind::blob && $h->kind != Kind::u128) {
+            return null;
+        }
+
+        if (!$this->image->fits($h->data, $h->size)) {
+            return null;
+        }
+
+        string $out = $this->image->data->sub($h->data, $h->size);
+
+        return $out;
+    }
+
+    private const function header() : Header?
+    {
+        if (!$this->present) {
+            return null;
+        }
+
+        return $this->image->field($this->base, $this->at);
+    }
+
+    private const function text(usize $at) : string?
+    {
+        Header $h = guard $this->image->field($this->base, $at) else {
+            return null;
+        }
+
+        if ($h->kind != Kind::text || !$this->image->fits($h->data, $h->size)) {
+            return null;
+        }
+
+        string $out = $this->image->data->sub($h->data, $h->size);
+
+        return $out;
+    }
+
+    private const function number(const Header& $h) : uint64?
+    {
+        if ($h->size > 8 || !$this->image->fits($h->data, $h->size)) {
+            return null;
+        }
+
+        return $this->image->be($h->data, $h->size);
+    }
+
+    private const function none() : Entry
+    {
+        return Entry($this->image, $this->base, 0, false);
+    }
+}
+
+/**
+ * One key and its value, from `Entry::pairs`.
+ */
+public struct Pair
+{
+    public string $key;
+    public Entry $value;
+}

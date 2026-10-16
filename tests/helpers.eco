@@ -1,0 +1,67 @@
+/**
+ * Addresses and databases for the tests.
+ */
+
+use mmdb::Database;
+
+internal const DATA = 'tests/data/';
+
+/**
+ * The database `tests/data/<name>.mmdb`. Stops the test when it does not
+ * open, which is a broken checkout and nothing else.
+ */
+internal function db(const string& $name) : Database
+{
+    $dir = DATA;
+    Database $d = guard Database::open("{$dir}{$name}.mmdb") else ($e) {
+        die("{$name}: {$e}");
+    }
+
+    return $d;
+}
+
+/**
+ * `a.b.c.d` as 4 raw bytes.
+ */
+internal function v4(uint8 $a, uint8 $b, uint8 $c, uint8 $d) : string
+{
+    $out = '';
+
+    $out->push($a);
+    $out->push($b);
+    $out->push($c);
+    $out->push($d);
+    return $out;
+}
+
+/**
+ * `a.b.c.d` as the 16 bytes of `::ffff:a.b.c.d`.
+ */
+internal function mapped(uint8 $a, uint8 $b, uint8 $c, uint8 $d) : string
+{
+    $out = '';
+
+    while ($out->size() < 10) {
+        $out->push(0 as uint8);
+    }
+
+    $out->push(255 as uint8);
+    $out->push(255 as uint8);
+    $out->append(v4($a, $b, $c, $d));
+    return $out;
+}
+
+/**
+ * An IPv6 address from its eight 16-bit groups, spelled out: no `::`.
+ */
+internal function v6(const array<uint16>& $groups) : string
+{
+    $out = '';
+
+    foreach ($groups as $g) {
+        $out->push(($g >> 8) as uint8);
+        $out->push(($g & 255) as uint8);
+    }
+
+    return $out;
+}

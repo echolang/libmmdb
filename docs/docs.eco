@@ -1,0 +1,18 @@
+/*
+ * libmmdb's API reference, built by ecodoc. From the repo root,
+ * `ecodoc build` writes the site to docs/dist.
+ */
+
+#[module: "docs"]
+
+#[docs::title: "libmmdb"]
+#[docs::description: "A pure Echo reader for MaxMind DB (.mmdb) files: GeoIP2, GeoLite2 and friends."]
+#[docs::repo: "https://github.com/echolang/libmmdb"]
+#[docs::source: "https://github.com/echolang/libmmdb/blob/master"]
+#[docs::url: "https://echolang.github.io/libmmdb"]
+#[docs::nav: [
+    { text: "API", link: "/api/" },
+    { text: "Echo", link: "https://echoc.dev" }
+]]
+#[docs::api: { manifest: "../module.eco", visibility: public, autolink: true }]
+#[docs::footer: { message: "MIT. Built with ecodoc." }]

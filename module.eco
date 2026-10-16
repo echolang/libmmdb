@@ -1,0 +1,23 @@
+/*
+ * libmmdb: reads MaxMind DB files (`.mmdb`), the format GeoIP2, GeoLite2,
+ * DB-IP and IPinfo databases ship in.
+ *
+ * Pure Echo, no libmaxminddb: the format is a spec, a binary search tree
+ * over the address bits followed by a typed data section. A database is
+ * read into memory once and is read-only after that, so one `Database` can
+ * be shared by every thread.
+ *
+ * The files under tests/data are MaxMind's test databases from
+ * github.com/maxmind/MaxMind-DB (Apache-2.0 or MIT, see LICENSE).
+ */
+
+#[module: "libmmdb"]
+#[version: "0.1.0"]
+#[epm::license: "MIT"]
+#[epm::description: "a pure Echo reader for MaxMind DB (.mmdb) files: GeoIP2, GeoLite2 and friends"]
+
+#[sources: "src/*.eco"]
+
+#[target: test] {
+    #[sources: "tests/*.eco"]
+}

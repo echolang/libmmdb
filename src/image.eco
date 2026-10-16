@@ -1,0 +1,223 @@
+/**
+ * The file in memory, and the decoder over it.
+ *
+ * Every data field starts with a control byte: the top three bits are the
+ * type (0 means "extended, the next byte is the type minus 7"), the low five
+ * the size, with 29, 30 and 31 meaning "the size continues in 1, 2 or 3 more
+ * bytes". A pointer uses its size bits differently: two bits say how many
+ * bytes follow, three are the high bits of the value. Integers are big
+ * endian and only as wide as their size says.
+ */
+
+namespace mmdb;
+
+/**
+ * The whole file, shared by a `Database` and every `Entry` read from it.
+ * Nothing writes it after `open`, so sharing it across threads only needs
+ * the atomic count.
+ */
+#[atomic]
+internal class Image
+{
+    internal const string $data;
+
+    internal constructor(mv string $data)
+    {
+        $this->data = mv $data;
+    }
+
+    internal const function size() : usize
+    {
+        return $this->data->size();
+    }
+
+    internal const function fits(usize $at, usize $n) : bool
+    {
+        return $at <= $this->data->size() && $n <= $this->data->size() - $at;
+    }
+
+    /**
+     * `$n` bytes at `$at` as one big-endian number. The caller checked they
+     * fit.
+     */
+    internal const function be(usize $at, usize $n) : uint64
+    {
+        uint64 $v = 0;
+        usize $i = 0;
+
+        while ($i < $n) {
+            $v = ($v << 8) | ($this->data->byte($at + $i) as uint64);
+            $i = $i + 1;
+        }
+
+        return $v;
+    }
+
+    /**
+     * The field at `$at` with a pointer followed, so what comes back is
+     * always the value itself. Pointers are offsets from `$base`, the start
+     * of the section the field lives in. The format forbids a pointer to a
+     * pointer, so there is only ever one hop.
+     */
+    internal const function field(usize $base, usize $at) : Header?
+    {
+        Header $h = guard $this->header($base, $at) else {
+            return null;
+        }
+
+        if ($h->kind != Kind::pointer) {
+            return $h;
+        }
+
+        Header $target = guard $this->header($base, $h->size) else {
+            return null;
+        }
+
+        if ($target->kind == Kind::pointer) {
+            return null;
+        }
+
+        return $target;
+    }
+
+    /**
+     * Where the field at `$at` ends, without following pointers: a pointer
+     * is only its own bytes, a map or array is everything inside it.
+     */
+    internal const function skip(usize $base, usize $at) : usize?
+    {
+        Header $h = guard $this->header($base, $at) else {
+            return null;
+        }
+
+        usize $end = $h->data;
+
+        if ($h->kind == Kind::pointer || $h->kind == Kind::boolean) {
+            return $end;
+        }
+
+        if ($h->kind == Kind::dict || $h->kind == Kind::list) {
+            usize $fields = $h->size;
+
+            if ($h->kind == Kind::dict) {
+                $fields = $h->size * 2;
+            }
+
+            usize $i = 0;
+
+            while ($i < $fields) {
+                usize $next = guard $this->skip($base, $end) else {
+                    return null;
+                }
+
+                $end = $next;
+
+                $i = $i + 1;
+            }
+
+            return $end;
+        }
+
+        if (!$this->fits($end, $h->size)) {
+            return null;
+        }
+
+        return $end + $h->size;
+    }
+
+    /**
+     * One control byte and its size bytes, as written. For a pointer,
+     * `size` is the absolute offset it points at.
+     */
+    internal const function header(usize $base, usize $at) : Header?
+    {
+        if (!$this->fits($at, 1)) {
+            return null;
+        }
+
+        uint8 $ctrl = $this->data->byte($at);
+        usize $p = $at + 1;
+        uint8 $type = $ctrl >> 5;
+
+        if ($type == 1) {
+            return $this->pointer($base, $ctrl, $p);
+        }
+
+        if ($type == 0) {
+            if (!$this->fits($p, 1)) {
+                return null;
+            }
+
+            uint8 $ext = $this->data->byte($p);
+
+            // an extended type byte of 0 would say type 7, which has its own code
+            if ($ext == 0 || $ext > 8) {
+                return null;
+            }
+
+            $type = $ext + 7;
+            $p = $p + 1;
+        }
+
+        Kind $kind = guard Kind::from($type) else {
+            return null;
+        }
+
+        usize $size = ($ctrl & 31) as usize;
+
+        if ($size >= 29) {
+            usize $extra = $size - 28;
+
+            if (!$this->fits($p, $extra)) {
+                return null;
+            }
+
+            uint64 $more = $this->be($p, $extra);
+
+            $p = $p + $extra;
+
+            if ($size == 29) {
+                $size = 29 + ($more as usize);
+            } else if ($size == 30) {
+                $size = 285 + ($more as usize);
+            } else {
+                $size = 65821 + ($more as usize);
+            }
+        }
+
+        return Header($kind, $size, $p);
+    }
+
+    private const function pointer(usize $base, uint8 $ctrl, usize $p) : Header?
+    {
+        usize $width = ((($ctrl >> 3) & 3) as usize) + 1;
+
+        if (!$this->fits($p, $width)) {
+            return null;
+        }
+
+        uint64 $high = ($ctrl & 7) as uint64;
+        uint64 $v = $this->be($p, $width);
+
+        if ($width == 1) {
+            $v = ($high << 8) | $v;
+        } else if ($width == 2) {
+            $v = (($high << 16) | $v) + 2048;
+        } else if ($width == 3) {
+            $v = (($high << 24) | $v) + 526336;
+        }
+
+        return Header(Kind::pointer, $base + ($v as usize), $p + $width);
+    }
+}
+
+/**
+ * A decoded control byte: the type, the size (a byte count, an entry
+ * count, or for a boolean the value), and where the payload starts.
+ */
+internal struct Header
+{
+    internal Kind $kind;
+    internal usize $size;
+    internal usize $data;
+}

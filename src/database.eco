@@ -1,0 +1,326 @@
+/**
+ * A MaxMind DB file, opened.
+ *
+ * The file is three sections: a binary search tree over the address bits,
+ * 16 zero bytes, the data section the tree points into, and at the very end
+ * the metadata, a map after the marker `\xAB\xCD\xEFMaxMind.com`.
+ */
+
+namespace mmdb;
+
+use std::io;
+
+/**
+ * What the metadata map says about the file. `description` is the English
+ * one, or the first there is.
+ */
+public struct Metadata
+{
+    public uint32 $nodes;
+    public uint16 $recordSize;
+    public uint16 $ipVersion;
+    public string $type;
+    public array<string> $languages;
+    public uint16 $major;
+    public uint16 $minor;
+    public uint64 $buildEpoch;
+    public string $description;
+}
+
+/**
+ * A lookup's answer: the record, and how many leading bits of the address
+ * the matched network has. For an IPv4 address the prefix counts IPv4 bits
+ * (0 to 32), even in an IPv6 tree.
+ */
+public struct Found
+{
+    public Entry $entry;
+    public uint8 $prefix;
+}
+
+/**
+ * An open database. Read-only after `open`, so one instance serves every
+ * thread; the count is atomic for exactly that.
+ */
+#[atomic]
+public class Database
+{
+    public const Metadata $meta;
+    private Image $image;
+    private Tree $tree;
+    private usize $metaStart;
+
+    private constructor(Image $image, Metadata $meta, Tree $tree, usize $metaStart)
+    {
+        $this->image = $image;
+        $this->meta = $meta;
+        $this->tree = $tree;
+        $this->metaStart = $metaStart;
+    }
+
+    /**
+     * Reads the file at `$path` into memory and opens it.
+     */
+    public static function open(const string& $path) : result<Database, MmdbError>
+    {
+        string $bytes = guard io::readfile($path) else {
+            return .error(.unreadable($path));
+        }
+
+        return Database::parse(mv $bytes);
+    }
+
+    /**
+     * Opens a database that is already in memory.
+     */
+    public static function parse(mv string $bytes) : result<Database, MmdbError>
+    {
+        usize $metaStart = guard Database::marker($bytes) else {
+            return .error(.noMetadata);
+        }
+
+        $image = Image(mv $bytes);
+        $root = Entry($image, $metaStart, $metaStart, true);
+
+        uint64 $nodes = guard $root->get('node_count')->asUint() else {
+            return .error(.badMetadata('node_count'));
+        }
+
+        uint64 $recordSize = guard $root->get('record_size')->asUint() else {
+            return .error(.badMetadata('record_size'));
+        }
+
+        uint64 $ipVersion = guard $root->get('ip_version')->asUint() else {
+            return .error(.badMetadata('ip_version'));
+        }
+
+        uint64 $major = guard $root->get('binary_format_major_version')->asUint() else {
+            return .error(.badMetadata('binary_format_major_version'));
+        }
+
+        if ($major != 2) {
+            return .error(.unsupported($major as uint16));
+        }
+
+        if ($recordSize != 24 && $recordSize != 28 && $recordSize != 32) {
+            return .error(.badMetadata('record_size'));
+        }
+
+        if ($ipVersion != 4 && $ipVersion != 6) {
+            return .error(.badMetadata('ip_version'));
+        }
+
+        if ($nodes > 4294967295) {
+            return .error(.badMetadata('node_count'));
+        }
+
+        $languages = array<string>();
+
+        foreach ($root->get('languages')->items() as $l) {
+            string? $name = $l->asStr();
+
+            if ($name != null) {
+                $languages[] = $name ?? '';
+            }
+        }
+
+        Entry $descriptions = $root->get('description');
+        string $description = $descriptions->get('en')->asStr() ?? '';
+
+        if ($description->empty() && $descriptions->count() > 0) {
+            $description = $descriptions->pairs()[0]->value->asStr() ?? '';
+        }
+
+        $meta = Metadata(
+            $nodes as uint32,
+            $recordSize as uint16,
+            $ipVersion as uint16,
+            $root->get('database_type')->asStr() ?? '',
+            $languages,
+            $major as uint16,
+            ($root->get('binary_format_minor_version')->asUint() ?? 0) as uint16,
+            $root->get('build_epoch')->asUint() ?? 0,
+            $description
+        );
+
+        $tree = Tree($image, $nodes, ($recordSize as usize) / 4);
+
+        // the tree, then 16 zero bytes, then data, all before the marker
+        if ($tree->size() + 16 + 14 > $metaStart) {
+            return .error(.badTree);
+        }
+
+        if ($ipVersion == 6) {
+            $tree->ipv4();
+        }
+
+        return .ok(Database($image, $meta, $tree, $metaStart));
+    }
+
+    /**
+     * The record for an address given as its raw bytes: 4 for IPv4, 16 for
+     * IPv6. A v4-mapped address (`::ffff:a.b.c.d`) is looked up as the IPv4
+     * address it maps. Null when the database has no record for it, and for
+     * an IPv6 address in an IPv4 database.
+     */
+    public const function lookup(const string& $ip) : Found?
+    {
+        if ($ip->size() == 4) {
+            return $this->find($ip, 32, $this->tree->v4);
+        }
+
+        if ($ip->size() != 16) {
+            return null;
+        }
+
+        if (Database::mapped($ip)) {
+            string $v4 = $ip->sub(12, 4);
+
+            return $this->find($v4, 32, $this->tree->v4);
+        }
+
+        if ($this->meta->ipVersion == 4) {
+            return null;
+        }
+
+        return $this->find($ip, 128, 0);
+    }
+
+    /**
+     * The metadata map itself, for fields `Metadata` does not carry.
+     */
+    public const function metadata() : Entry
+    {
+        return Entry($this->image, $this->metaStart, $this->metaStart, true);
+    }
+
+    private const function find(const string& $ip, usize $bits, uint64 $start) : Found?
+    {
+        uint64 $nodes = $this->meta->nodes as uint64;
+        uint64 $node = $start;
+        usize $i = 0;
+
+        while ($i < $bits && $node < $nodes) {
+            uint8 $bit = ($ip->byte($i / 8) >> ((7 - ($i % 8)) as uint8)) & 1;
+
+            $node = $this->tree->record($node, $bit);
+            $i = $i + 1;
+        }
+
+        // equal to the node count is the "no data" record
+        if ($node <= $nodes) {
+            return null;
+        }
+
+        // a record past the node count points at data, 16 bytes after the tree
+        usize $at = $this->tree->size() + (($node - $nodes) as usize);
+
+        if ($at >= $this->metaStart) {
+            return null;
+        }
+
+        return Found(Entry($this->image, $this->tree->size() + 16, $at, true), $i as uint8);
+    }
+
+    private static function mapped(const string& $ip) : bool
+    {
+        usize $i = 0;
+
+        while ($i < 10) {
+            if ($ip->byte($i) != 0) {
+                return false;
+            }
+
+            $i = $i + 1;
+        }
+
+        return $ip->byte(10) == 255 && $ip->byte(11) == 255;
+    }
+
+    /**
+     * Where the metadata map starts: right after the last marker in the
+     * final 128 KiB, which is as far from the end as the spec lets it be.
+     */
+    private static function marker(const string& $bytes) : usize?
+    {
+        $marker = '';
+
+        $marker->push(171 as uint8);
+        $marker->push(205 as uint8);
+        $marker->push(239 as uint8);
+        $marker->append('MaxMind.com');
+
+        usize $from = 0;
+
+        if ($bytes->size() > 131072) {
+            $from = $bytes->size() - 131072;
+        }
+
+        usize? $last = null;
+        usize $at = $bytes->find($marker, $from);
+
+        while ($at < $bytes->size()) {
+            $last = $at + $marker->size();
+            $at = $bytes->find($marker, $at + 1);
+        }
+
+        return $last;
+    }
+}
+
+/**
+ * The search tree. Each node is two records, left for a 0 bit and right
+ * for a 1, of 24, 28 or 32 bits each. At 28 the middle byte holds the high
+ * nibble of both: its top half belongs to the left record.
+ */
+internal struct Tree
+{
+    internal Image $image;
+    internal uint64 $nodes;
+    internal usize $width;
+
+    /**
+     * The node where IPv4 addresses start in an IPv6 tree: the one 96 zero
+     * bits down, since IPv4 lives at `::a.b.c.d`. 0 in an IPv4 tree.
+     */
+    internal uint64 $v4 = 0;
+
+    internal const function size() : usize
+    {
+        return ($this->nodes as usize) * $this->width;
+    }
+
+    internal function ipv4() : void
+    {
+        uint64 $node = 0;
+        usize $i = 0;
+
+        while ($i < 96 && $node < $this->nodes) {
+            $node = $this->record($node, 0);
+            $i = $i + 1;
+        }
+
+        $this->v4 = $node;
+    }
+
+    internal const function record(uint64 $node, uint8 $bit) : uint64
+    {
+        usize $at = ($node as usize) * $this->width;
+
+        if ($this->width == 6) {
+            return $this->image->be($at + ($bit as usize) * 3, 3);
+        }
+
+        if ($this->width == 8) {
+            return $this->image->be($at + ($bit as usize) * 4, 4);
+        }
+
+        uint64 $middle = $this->image->data->byte($at + 3) as uint64;
+
+        if ($bit == 0) {
+            return (($middle >> 4) << 24) | $this->image->be($at, 3);
+        }
+
+        return (($middle & 15) << 24) | $this->image->be($at + 4, 3);
+    }
+}

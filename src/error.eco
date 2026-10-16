@@ -1,0 +1,49 @@
+/**
+ * Why a database could not be opened.
+ */
+
+namespace mmdb;
+
+public enum MmdbError
+{
+    /**
+     * The file could not be read at all: missing, a directory, no
+     * permission. The payload is the path.
+     */
+    case unreadable(string $path);
+
+    /**
+     * No metadata marker in the last 128 KiB, so this is not a MaxMind DB
+     * file, or it was cut short.
+     */
+    case noMetadata;
+
+    /**
+     * The metadata is there but a required field is missing or out of
+     * range. The payload names the field.
+     */
+    case badMetadata(string $field);
+
+    /**
+     * A major format version this reader does not know. Only 2 exists.
+     */
+    case unsupported(uint16 $major);
+
+    /**
+     * The search tree does not fit in the file.
+     */
+    case badTree;
+}
+
+namespace str;
+
+public function from(const mmdb::MmdbError& $e) : string
+{
+    return match ($e) {
+        mmdb::MmdbError::unreadable($path) => "cannot read {$path}",
+        mmdb::MmdbError::noMetadata => 'not a MaxMind DB file: no metadata marker',
+        mmdb::MmdbError::badMetadata($field) => "bad metadata field {$field}",
+        mmdb::MmdbError::unsupported($major) => "unsupported format version {$major}",
+        mmdb::MmdbError::badTree => 'the search tree does not fit in the file',
+    };
+}

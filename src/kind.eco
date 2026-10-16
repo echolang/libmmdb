@@ -1,0 +1,65 @@
+/**
+ * The data section's field types. The backing value is the type number the
+ * format writes in a control byte, so `Kind::from` reads one directly.
+ */
+
+namespace mmdb;
+
+public enum Kind : uint8
+{
+    /**
+     * Not a stored type: what an `Entry` is when the key or index it was
+     * asked for does not exist.
+     */
+    case missing = 0;
+
+    /**
+     * Never seen from outside: the decoder follows pointers.
+     */
+    case pointer = 1;
+    case text = 2;
+    case f64 = 3;
+    case blob = 4;
+    case u16 = 5;
+    case u32 = 6;
+    case dict = 7;
+    case i32 = 8;
+    case u64 = 9;
+    case u128 = 10;
+    case list = 11;
+
+    /**
+     * Reserved by the format for a data cache. A reader never meets it in a
+     * record.
+     */
+    case container = 12;
+
+    /**
+     * Marks the end of the data section. Never inside a record.
+     */
+    case end = 13;
+    case boolean = 14;
+    case f32 = 15;
+
+    public const function name() : string
+    {
+        return match ($this) {
+            Kind::missing => 'missing',
+            Kind::pointer => 'pointer',
+            Kind::text => 'text',
+            Kind::f64 => 'f64',
+            Kind::blob => 'blob',
+            Kind::u16 => 'u16',
+            Kind::u32 => 'u32',
+            Kind::dict => 'dict',
+            Kind::i32 => 'i32',
+            Kind::u64 => 'u64',
+            Kind::u128 => 'u128',
+            Kind::list => 'list',
+            Kind::container => 'container',
+            Kind::end => 'end',
+            Kind::boolean => 'boolean',
+            Kind::f32 => 'f32',
+        };
+    }
+}

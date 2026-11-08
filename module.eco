@@ -13,6 +13,7 @@
 
 #[module: "libmmdb"]
 #[version: "0.1.0"]
+#[epm::echoc: ">=0.14.0"]
 #[epm::license: "MIT"]
 #[epm::description: "a pure Echo reader for MaxMind DB (.mmdb) files: GeoIP2, GeoLite2 and friends"]
 

@@ -63,7 +63,7 @@ public class Database
      */
     public static function open(const string& $path) : result<Database, MmdbError>
     {
-        string $bytes = guard io::readfile($path) else {
+        string $bytes = guard std::fs::readfile($path) else {
             return .error(.unreadable($path));
         }
 
